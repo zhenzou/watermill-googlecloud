@@ -70,6 +70,9 @@ type SubscriberConfig struct {
 	// Otherwise, trying to use non-existent subscription results in `ErrSubscriptionDoesNotExist`.
 	DoNotCreateSubscriptionIfMissing bool
 
+	// If false (default), `Subscriber` tries to update a subscription endpoint the requested endpoint is not the same as the current one.
+	DoNotUpdateSubscriptionIfEndpointChanged bool
+
 	// If false (default), `Subscriber` tries to create a topic if there is none with the requested name
 	// and it is trying to create a new subscription with this topic name.
 	// Otherwise, trying to create a subscription on non-existent topic results in `ErrTopicDoesNotExist`.
@@ -431,6 +434,10 @@ func (s *Subscriber) newClient(ctx context.Context) (*pubsub.Client, error) {
 	return client, nil
 }
 
+func (s *Subscriber) isPushEndpointChanged(config pubsub.SubscriptionConfig) bool {
+	return config.PushConfig.Endpoint != s.config.SubscriptionConfig.PushConfig.Endpoint
+}
+
 func (s *Subscriber) existingSubscription(ctx context.Context, sub *pubsub.Subscription, topic string) (*pubsub.Subscription, error) {
 	config, err := sub.Config(ctx)
 	if err != nil {
@@ -447,7 +454,31 @@ func (s *Subscriber) existingSubscription(ctx context.Context, sub *pubsub.Subsc
 	}
 
 	sub.ReceiveSettings = s.config.ReceiveSettings
+	if s.config.DoNotUpdateSubscriptionIfEndpointChanged {
+		return sub, nil
+	}
 
+	if s.isPushEndpointChanged(config) {
+		updatedConfig, err := sub.Update(ctx, pubsub.SubscriptionConfigToUpdate{
+			PushConfig: &s.config.SubscriptionConfig.PushConfig,
+		})
+		if err != nil {
+			return nil, errors.Wrap(err, "could not update subscription")
+		}
+		logFields := watermill.LogFields{
+			"provider":          ProviderName,
+			"topic":             topic,
+			"subscription_name": sub.String(),
+			"old_endpoint":      config.PushConfig.Endpoint,
+			"new_endpoint":      updatedConfig.PushConfig.Endpoint,
+		}
+		s.logger.Info("Updated subscription endpoint", logFields)
+
+		s.logger.Debug("Updated subscription config", watermill.LogFields{
+			"old_config": config,
+			"new_config": updatedConfig,
+		})
+	}
 	return sub, nil
 }
 
