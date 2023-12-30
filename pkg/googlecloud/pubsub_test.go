@@ -14,9 +14,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ThreeDotsLabs/watermill"
-	"github.com/ThreeDotsLabs/watermill-googlecloud/pkg/googlecloud"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/ThreeDotsLabs/watermill/pubsub/tests"
+
+	"github.com/ThreeDotsLabs/watermill-googlecloud/pkg/googlecloud"
 )
 
 // Run `docker-compose up` and set PUBSUB_EMULATOR_HOST=localhost:8085 for this to work
@@ -277,6 +278,66 @@ func produceMessages(t *testing.T, topic string, howMany int) {
 	}
 
 	require.NoError(t, pub.Publish(topic, messages...))
+}
+
+func TestSubscriberEndpointChanged(t *testing.T) {
+	rand.Seed(time.Now().Unix())
+	testNumber := rand.Int()
+	logger := watermill.NewStdLogger(true, true)
+
+	subNameFn := func(topic string) string {
+		return fmt.Sprintf("sub_%d", testNumber)
+	}
+
+	topic := fmt.Sprintf("topic2_%d", testNumber)
+
+	sub1, err := googlecloud.NewSubscriber(googlecloud.SubscriberConfig{
+		GenerateSubscriptionName: subNameFn,
+		SubscriptionConfig: pubsub.SubscriptionConfig{
+			PushConfig: pubsub.PushConfig{
+				Endpoint: "https://google.com/v1",
+				Attributes: map[string]string{
+					"test_key": "test_value",
+				},
+				AuthenticationMethod: nil,
+			},
+			AckDeadline:         30 * time.Second,
+			RetainAckedMessages: false,
+			RetentionDuration:   0,
+			ExpirationPolicy:    time.Duration(0),
+			Labels: map[string]string{
+				"project": "test",
+			},
+			EnableMessageOrdering: true,
+			Filter:                "",
+			RetryPolicy: &pubsub.RetryPolicy{
+				MinimumBackoff: 10 * time.Second,
+				MaximumBackoff: 30 * time.Second,
+			},
+			Detached:                      false,
+			TopicMessageRetentionDuration: 0,
+		},
+	}, logger)
+	require.NoError(t, err)
+
+	err = sub1.SubscribeInitialize(topic)
+	require.NoError(t, err)
+
+	sub2, err := googlecloud.NewSubscriber(googlecloud.SubscriberConfig{
+		GenerateSubscriptionName: subNameFn,
+		SubscriptionConfig: pubsub.SubscriptionConfig{
+			PushConfig: pubsub.PushConfig{
+				Endpoint: "https://google.com/v2",
+				Attributes: map[string]string{
+					"test_key": "test_value",
+				},
+			},
+		},
+	}, logger)
+	require.NoError(t, err)
+
+	err = sub2.SubscribeInitialize(topic)
+	require.NoError(t, err)
 }
 
 func TestPublishOrdering(t *testing.T) {
