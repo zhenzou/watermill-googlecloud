@@ -3,6 +3,7 @@ package googlecloud
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,6 +73,9 @@ type SubscriberConfig struct {
 
 	// If false (default), `Subscriber` tries to update a subscription endpoint the requested endpoint is not the same as the current one.
 	DoNotUpdateSubscriptionIfEndpointChanged bool
+
+	// If true, `Subscriber` tries to recreate a subscription if the filter is changed.
+	RecreateSubscriptionIfFilterChanged bool
 
 	// If false (default), `Subscriber` tries to create a topic if there is none with the requested name
 	// and it is trying to create a new subscription with this topic name.
@@ -377,15 +381,26 @@ func (s *Subscriber) subscription(ctx context.Context, subscriptionName, topicNa
 	}
 
 	if exists {
-		return s.existingSubscription(ctx, sub, topicName)
+		return s.existingSubscription(ctx, client, sub, topicName, subscriptionName)
 	}
 
 	if s.config.DoNotCreateSubscriptionIfMissing {
 		return nil, errors.Wrap(ErrSubscriptionDoesNotExist, subscriptionName)
 	}
 
+	sub, err = s.createSubscription(ctx, client, topicName, subscriptionName)
+	if err != nil {
+		return nil, err
+	}
+
+	sub.ReceiveSettings = s.config.ReceiveSettings
+
+	return sub, nil
+}
+
+func (s *Subscriber) createSubscription(ctx context.Context, client *pubsub.Client, topicName, subscriptionName string) (*pubsub.Subscription, error) {
 	t := client.Topic(topicName)
-	exists, err = t.Exists(ctx)
+	exists, err := t.Exists(ctx)
 	if err != nil {
 		return nil, errors.Wrapf(err, "could not check if topic %s exists", topicName)
 	}
@@ -408,16 +423,13 @@ func (s *Subscriber) subscription(ctx context.Context, subscriptionName, topicNa
 	config := s.config.SubscriptionConfig
 	config.Topic = t
 
-	sub, err = client.CreateSubscription(ctx, subscriptionName, config)
+	sub, err := client.CreateSubscription(ctx, subscriptionName, config)
 	if status.Code(err) == codes.AlreadyExists {
 		s.logger.Debug("Subscription already exists", watermill.LogFields{"subscription": subscriptionName})
 		sub = client.Subscription(subscriptionName)
 	} else if err != nil {
 		return nil, errors.Wrap(err, "cannot create subscription")
 	}
-
-	sub.ReceiveSettings = s.config.ReceiveSettings
-
 	return sub, nil
 }
 
@@ -434,17 +446,23 @@ func (s *Subscriber) newClient(ctx context.Context) (*pubsub.Client, error) {
 	return client, nil
 }
 
+func (s *Subscriber) isFilterChanged(config pubsub.SubscriptionConfig) bool {
+	oldFilter := strings.ReplaceAll(config.Filter, " ", "")
+	newFilter := strings.ReplaceAll(s.config.SubscriptionConfig.Filter, " ", "")
+	return oldFilter != newFilter
+}
+
 func (s *Subscriber) isPushEndpointChanged(config pubsub.SubscriptionConfig) bool {
 	return config.PushConfig.Endpoint != s.config.SubscriptionConfig.PushConfig.Endpoint
 }
 
-func (s *Subscriber) existingSubscription(ctx context.Context, sub *pubsub.Subscription, topic string) (*pubsub.Subscription, error) {
+func (s *Subscriber) existingSubscription(ctx context.Context, client *pubsub.Client, sub *pubsub.Subscription, topicName, subscriptionName string) (*pubsub.Subscription, error) {
 	config, err := sub.Config(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "could not fetch config for existing subscription")
 	}
 
-	fullyQualifiedTopicName := fmt.Sprintf("projects/%s/topics/%s", s.config.topicProjectID(), topic)
+	fullyQualifiedTopicName := fmt.Sprintf("projects/%s/topics/%s", s.config.topicProjectID(), topicName)
 
 	if config.Topic.String() != fullyQualifiedTopicName {
 		return nil, errors.Wrap(
@@ -454,6 +472,22 @@ func (s *Subscriber) existingSubscription(ctx context.Context, sub *pubsub.Subsc
 	}
 
 	sub.ReceiveSettings = s.config.ReceiveSettings
+
+	if s.isFilterChanged(config) && s.config.RecreateSubscriptionIfFilterChanged {
+		s.logger.Debug("filter changed", watermill.LogFields{
+			"subscription_name": sub.String(),
+			"old_filter":        config.Filter,
+			"new_filter":        s.config.SubscriptionConfig.Filter,
+		})
+		if err := sub.Delete(ctx); err != nil {
+			return nil, errors.Wrap(err, "could not delete subscription")
+		}
+		s.logger.Debug("Deleted subscription", watermill.LogFields{
+			"subscription_name": sub.String(),
+		})
+		return s.createSubscription(ctx, client, topicName, subscriptionName)
+	}
+
 	if s.config.DoNotUpdateSubscriptionIfEndpointChanged {
 		return sub, nil
 	}
@@ -467,7 +501,7 @@ func (s *Subscriber) existingSubscription(ctx context.Context, sub *pubsub.Subsc
 		}
 		logFields := watermill.LogFields{
 			"provider":          ProviderName,
-			"topic":             topic,
+			"topic":             topicName,
 			"subscription_name": sub.String(),
 			"old_endpoint":      config.PushConfig.Endpoint,
 			"new_endpoint":      updatedConfig.PushConfig.Endpoint,
