@@ -281,7 +281,6 @@ func produceMessages(t *testing.T, topic string, howMany int) {
 }
 
 func TestSubscriberEndpointChanged(t *testing.T) {
-	rand.Seed(time.Now().Unix())
 	testNumber := rand.Int()
 	logger := watermill.NewStdLogger(true, true)
 
@@ -292,6 +291,7 @@ func TestSubscriberEndpointChanged(t *testing.T) {
 	topic := fmt.Sprintf("topic2_%d", testNumber)
 
 	sub1, err := googlecloud.NewSubscriber(googlecloud.SubscriberConfig{
+		ProjectID:                "tests",
 		GenerateSubscriptionName: subNameFn,
 		SubscriptionConfig: pubsub.SubscriptionConfig{
 			PushConfig: pubsub.PushConfig{
@@ -324,6 +324,7 @@ func TestSubscriberEndpointChanged(t *testing.T) {
 	require.NoError(t, err)
 
 	sub2, err := googlecloud.NewSubscriber(googlecloud.SubscriberConfig{
+		ProjectID:                "tests",
 		GenerateSubscriptionName: subNameFn,
 		SubscriptionConfig: pubsub.SubscriptionConfig{
 			PushConfig: pubsub.PushConfig{
